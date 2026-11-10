@@ -17,7 +17,10 @@
   #shutter{position:fixed;right:22px;top:50%;transform:translateY(-50%);width:74px;height:74px;border-radius:50%;
            background:#fff;border:6px solid rgba(255,255,255,.5);background-clip:padding-box;padding:0}
   #align{position:fixed;left:16px;bottom:16px;background:rgba(20,20,20,.7)}
-  #gear{position:fixed;left:16px;top:10px;background:rgba(20,20,20,.7);padding:8px 12px;display:none}
+  #gear{position:fixed;left:120px;bottom:16px;background:rgba(20,20,20,.7);padding:8px 12px;display:none}
+  .logo{position:fixed;top:2.5vh;width:calc(var(--ls,14)*1vh);height:calc(var(--ls,14)*1vh);border-radius:50%;object-fit:cover;background:#fff;border:2px solid rgba(255,255,255,.9);pointer-events:none}
+  #logoL{left:2.5vh}
+  #logoR{right:2.5vh}
   #flash{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .25s}
   #rotate{display:none;z-index:20}
   #rotate .ico{font-size:60px}
@@ -25,7 +28,7 @@
   #preview img{max-width:90%;max-height:62%;border-radius:8px;object-fit:contain}
   #preview .row{margin-top:12px}
   #preview .row button{margin:4px}
-  #admin{display:none;position:fixed;left:0;top:50px;bottom:0;width:300px;overflow:auto;background:rgba(0,0,0,.75);padding:10px;font-size:13px}
+  #admin{display:none;z-index:10;position:fixed;left:0;top:0;bottom:70px;width:300px;overflow:auto;background:rgba(0,0,0,.75);padding:10px;font-size:13px}
   #admin label{display:block;margin-top:6px}
   #admin input[type=range]{width:100%}
   #admin textarea{width:100%;height:80px;font-size:11px}
@@ -36,6 +39,8 @@
 <canvas id="gl"></canvas>
 
 <div id="hud">
+  <img id="logoL" class="logo" src="logo-left.png" alt="" onerror="this.dataset.bad=1;this.style.display='none'">
+  <img id="logoR" class="logo" src="logo-right.png" alt="" onerror="this.dataset.bad=1;this.style.display='none'">
   <div id="hint">Face the real aircraft, then take your photo.</div>
   <button id="shutter" aria-label="Take photo"></button>
   <button id="align">Re-align</button>
@@ -92,6 +97,9 @@ const cfg = {
   ax:  num('ax', 22),    // A-4 distance to the RIGHT of centre (m)
   ey:  num('ey', 0),     // E-2C extra turn (deg)
   ay:  num('ay', 0),     // A-4 extra turn (deg)
+  se:  num('se', 1),     // E-2C size multiplier (1 = real life-size)
+  sa:  num('sa', 1),     // A-4 size multiplier (1 = real life-size)
+  ls:  num('ls', 14),    // logo size (% of photo height)
 };
 const ADMIN = P.has('admin');
 
@@ -160,6 +168,8 @@ function layout() {
   // Visitor's forward = -z, right = +x. Aircraft nose faces the visitor (rotate 180°).
   holders.e2c.position.set(-cfg.ex, 0, -cfg.d);
   holders.a4.position.set(cfg.ax, 0, -cfg.d);
+  holders.e2c.scale.setScalar(cfg.se); holders.a4.scale.setScalar(cfg.sa);
+  document.documentElement.style.setProperty('--ls', cfg.ls);
   holders.e2c.rotation.y = Math.PI + THREE.MathUtils.degToRad(cfg.ey);
   holders.a4.rotation.y = Math.PI + THREE.MathUtils.degToRad(cfg.ay);
 }
@@ -250,6 +260,19 @@ $('shutter').addEventListener('click', () => {
   const x = c.getContext('2d');
   x.drawImage(video, sx, sy, sw, sh, 0, 0, ow, oh);
   x.drawImage(glCanvas, 0, 0, ow, oh);
+  // circular logos in the two top corners
+  const ld = Math.round(oh * cfg.ls / 100), m = Math.round(oh * 0.025);
+  for (const [id, lx] of [['logoL', m], ['logoR', ow - m - ld]]) {
+    const im = $(id);
+    if (!im.complete || !im.naturalWidth || im.dataset.bad) continue;
+    const q = Math.min(im.naturalWidth, im.naturalHeight);
+    x.save(); x.beginPath(); x.arc(lx + ld / 2, m + ld / 2, ld / 2, 0, Math.PI * 2); x.closePath();
+    x.fillStyle = '#fff'; x.fill(); x.clip();
+    x.drawImage(im, (im.naturalWidth - q) / 2, (im.naturalHeight - q) / 2, q, q, lx, m, ld, ld);
+    x.restore();
+    x.beginPath(); x.arc(lx + ld / 2, m + ld / 2, ld / 2 - 1, 0, Math.PI * 2);
+    x.lineWidth = Math.max(2, ld * 0.03); x.strokeStyle = 'rgba(255,255,255,.9)'; x.stroke();
+  }
   const fl = $('flash'); fl.style.opacity = 0.8; setTimeout(() => fl.style.opacity = 0, 120);
   c.toBlob(b => {
     lastBlob = b;
@@ -283,6 +306,9 @@ function buildAdmin() {
     ['ax',  'A-4 to the right (m)', 0, 80, 1],
     ['ey',  'E-2C turn (deg)', -90, 90, 1],
     ['ay',  'A-4 turn (deg)', -90, 90, 1],
+    ['se',  'E-2C size (1 = life-size)', 0.3, 2, 0.01],
+    ['sa',  'A-4 size (1 = life-size)', 0.3, 2, 0.01],
+    ['ls',  'Logo size (% of photo height)', 6, 25, 1],
   ];
   const box = $('admin');
   for (const [k, label, min, max, step] of items) {
