@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Static Display AR Photo</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#000;font-family:system-ui,sans-serif;color:#fff}
+  #video,#gl{position:fixed;inset:0;width:100%;height:100%}
+  #video{object-fit:cover}
+  button{font-size:16px;padding:12px 18px;border:0;border-radius:10px;background:#1e88e5;color:#fff}
+  .full{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px;background:#0b1a2b}
+  .full p{max-width:380px;line-height:1.45;opacity:.9}
+  #msg{color:#ffb74d;margin-top:12px;max-width:380px}
+  #hud{display:none}
+  #hint{position:fixed;top:10px;left:0;right:0;text-align:center;font-size:15px;text-shadow:0 0 4px #000;pointer-events:none}
+  #shutter{position:fixed;right:22px;top:50%;transform:translateY(-50%);width:74px;height:74px;border-radius:50%;
+           background:#fff;border:6px solid rgba(255,255,255,.5);background-clip:padding-box;padding:0}
+  #align{position:fixed;left:16px;bottom:16px;background:rgba(20,20,20,.7)}
+  #gear{position:fixed;left:120px;bottom:16px;background:rgba(20,20,20,.7);padding:8px 12px;display:none}
+  .logo{position:fixed;top:2.5vh;width:calc(var(--ls,14)*1vh);height:calc(var(--ls,14)*1vh);border-radius:50%;object-fit:cover;background:#fff;border:2px solid rgba(255,255,255,.9);pointer-events:none}
+  #logoL{left:2.5vh}
+  #logoR{right:2.5vh}
+  #flash{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .25s}
+  #rotate{display:none;z-index:20}
+  #rotate .ico{font-size:60px}
+  #preview{display:none;z-index:30;justify-content:space-between}
+  #preview img{max-width:90%;max-height:62%;border-radius:8px;object-fit:contain}
+  #preview .row{margin-top:12px}
+  #preview .row button{margin:4px}
+  #admin{display:none;z-index:10;position:fixed;left:0;top:0;bottom:70px;width:300px;overflow:auto;background:rgba(0,0,0,.75);padding:10px;font-size:13px}
+  #admin label{display:block;margin-top:6px}
+  #admin input[type=range]{width:100%}
+  #admin textarea{width:100%;height:80px;font-size:11px}
+</style>
+</head>
+<body>
+<video id="video" playsinline muted autoplay></video>
+<canvas id="gl"></canvas>
+
+<div id="hud">
+  <img id="logoL" class="logo" src="logo-left.png" alt="" onerror="this.dataset.bad=1;this.style.display='none'">
+  <img id="logoR" class="logo" src="logo-right.png" alt="" onerror="this.dataset.bad=1;this.style.display='none'">
+  <div id="hint">Face the real aircraft, then take your photo.</div>
+  <button id="shutter" aria-label="Take photo"></button>
+  <button id="align">Re-align</button>
+  <button id="gear">⚙ Setup</button>
+  <div id="admin"></div>
+</div>
+<div id="flash"></div>
+
+<div class="full" id="start">
+  <h2>Static Display AR Photo</h2>
+  <p>Pose with the real aircraft and see the virtual E-2C Hawkeye and A-4 Skyhawk beside them. Hold your phone <b>sideways (landscape)</b>, stand at the photo spot and face the display.</p>
+  <button id="startBtn">Start</button>
+  <div id="msg"></div>
+</div>
+
+<div class="full" id="rotate">
+  <div class="ico">📱↻</div>
+  <p>Please turn your phone sideways (landscape).</p>
+</div>
+
+<div class="full" id="preview">
+  <img id="shot" alt="Your photo">
+  <p style="font-size:13px;margin:6px">Tap <b>Save</b> to put it in your phone. Or press and hold the photo, then choose "Download image".</p>
+  <div class="row">
+    <button id="save">Save to phone</button>
+    <button id="share" style="display:none">Share</button>
+    <button id="retake" style="background:#555">Retake</button>
+  </div>
+</div>
+
+<script type="importmap">
+{"imports":{
+ "three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+ "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+/* ======== AIRCRAFT (real sizes in metres) ======== */
+const AIRCRAFT = [
+  { id:'e2c', name:'E-2C Hawkeye', file:'e2c.glb', length:17.5, span:24.56, color:0xb0b8c0, dome:true, yawDeg:0 },
+  { id:'a4',  name:'A-4 Skyhawk',  file:'a4.glb',  length:12.7, span:8.4,   color:0x8a9aa8, yawDeg:0 },
+];
+/* ======== SETTINGS (can be changed with the link, see ?admin=1) ======== */
+const P = new URLSearchParams(location.search);
+const num = (k, d) => (P.has(k) && isFinite(+P.get(k))) ? +P.get(k) : d;
+const cfg = {
+  fov: num('fov', 42),   // camera vertical field of view (deg)
+  h:   num('h', 1.5),    // phone height above ground (m)
+  d:   num('d', 50),     // distance from visitor to the aircraft line (m)
+  ex:  num('ex', 30),    // E-2C distance to the LEFT of centre (m)
+  ax:  num('ax', 22),    // A-4 distance to the RIGHT of centre (m)
+  ey:  num('ey', 0),     // E-2C extra turn (deg)
+  ay:  num('ay', 0),     // A-4 extra turn (deg)
+  se:  num('se', 1),     // E-2C size multiplier (1 = real life-size)
+  sa:  num('sa', 1),     // A-4 size multiplier (1 = real life-size)
+  ls:  num('ls', 14),    // logo size (% of photo height)
+};
+const ADMIN = P.has('admin');
+
+const $ = id => document.getElementById(id);
+const video = $('video'), glCanvas = $('gl'), msg = $('msg');
+
+/* ---------- three.js scene ---------- */
+const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, alpha: true, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(cfg.fov, innerWidth / innerHeight, 0.1, 1000);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x998877, 1.7));
+const sun = new THREE.DirectionalLight(0xffffff, 1.8); sun.position.set(20, 40, 15); scene.add(sun);
+const root = new THREE.Group(); scene.add(root);
+const holders = {};
+
+function placeholder(a) {
+  const g = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color: a.color });
+  const L = a.length, S = a.span, r = L * 0.07, h = r + 1.2;
+  const fus = new THREE.Mesh(new THREE.CylinderGeometry(r, r * 0.8, L * 0.85, 20), mat);
+  fus.rotation.x = Math.PI / 2; fus.position.set(0, h, L * 0.075); g.add(fus);
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(r, L * 0.15, 20), mat);
+  nose.rotation.x = -Math.PI / 2; nose.position.set(0, h, -L * 0.5); g.add(nose);
+  const wing = new THREE.Mesh(new THREE.BoxGeometry(S, 0.25, L * 0.18), mat);
+  wing.position.set(0, h, -L * 0.05); g.add(wing);
+  const fin = new THREE.Mesh(new THREE.BoxGeometry(0.2, L * 0.2, L * 0.12), mat);
+  fin.position.set(0, h + L * 0.1, L * 0.42); g.add(fin);
+  const stab = new THREE.Mesh(new THREE.BoxGeometry(S * 0.35, 0.15, L * 0.08), mat);
+  stab.position.set(0, h, L * 0.45); g.add(stab);
+  if (a.dome) {
+    const dome = new THREE.Mesh(new THREE.CylinderGeometry(3.7, 3.7, 0.5, 32), mat);
+    dome.position.set(0, h + r + 1.2, L * 0.05); g.add(dome);
+  }
+  return g;
+}
+
+async function loadAircraft(a) {
+  const holder = new THREE.Group();
+  let obj;
+  try {
+    const gltf = await new GLTFLoader().loadAsync(a.file);
+    obj = gltf.scene;
+    const box = new THREE.Box3().setFromObject(obj);
+    const sz = box.getSize(new THREE.Vector3());
+    // scale so the longest horizontal side matches the real wingspan/length
+    const target = Math.max(a.span, a.length);
+    obj.scale.setScalar(target / Math.max(sz.x, sz.z));
+    box.setFromObject(obj);
+    const c = box.getCenter(new THREE.Vector3());
+    obj.position.x -= c.x; obj.position.z -= c.z; obj.position.y -= box.min.y;
+  } catch (e) { console.warn('Model missing, using stand-in:', a.file); obj = placeholder(a); }
+  const pivot = new THREE.Group(); pivot.add(obj);
+  pivot.rotation.y = THREE.MathUtils.degToRad(a.yawDeg);
+  holder.add(pivot);
+  const sh = new THREE.Mesh(new THREE.CircleGeometry(Math.max(a.span, a.length) * 0.45, 32),
+    new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.25, depthWrite: false }));
+  sh.rotation.x = -Math.PI / 2; sh.position.y = 0.02; sh.scale.set(1, 0.7, 1);
+  holder.add(sh);
+  return holder;
+}
+
+function layout() {
+  camera.fov = cfg.fov; camera.updateProjectionMatrix();
+  camera.position.set(0, cfg.h, 0);
+  // Visitor's forward = -z, right = +x. Aircraft nose faces the visitor (rotate 180°).
+  holders.e2c.position.set(-cfg.ex, 0, -cfg.d);
+  holders.a4.position.set(cfg.ax, 0, -cfg.d);
+  holders.e2c.scale.setScalar(cfg.se); holders.a4.scale.setScalar(cfg.sa);
+  document.documentElement.style.setProperty('--ls', cfg.ls);
+  holders.e2c.rotation.y = Math.PI + THREE.MathUtils.degToRad(cfg.ey);
+  holders.a4.rotation.y = Math.PI + THREE.MathUtils.degToRad(cfg.ay);
+}
+
+/* ---------- phone orientation -> camera ---------- */
+const zee = new THREE.Vector3(0, 0, 1), euler = new THREE.Euler();
+const q0 = new THREE.Quaternion(), q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
+function deviceQuat(out, a, b, g, o) {
+  euler.set(b, a, -g, 'YXZ');
+  out.setFromEuler(euler);
+  out.multiply(q1);
+  out.multiply(q0.setFromAxisAngle(zee, -o));
+  return out;
+}
+let orient = null, camReady = false, gotEvent = false;
+const target = new THREE.Quaternion();
+const rad = THREE.MathUtils.degToRad;
+addEventListener('deviceorientation', e => {
+  if (e.alpha == null) return;
+  gotEvent = true;
+  orient = { a: rad(e.alpha), b: rad(e.beta), g: rad(e.gamma) };
+});
+
+function align() {
+  // Make the aircraft layout centred on where the phone is currently pointing
+  const f = new THREE.Vector3(); camera.getWorldDirection(f);
+  root.rotation.y = Math.atan2(-f.x, -f.z);
+}
+
+function resize() {
+  renderer.setSize(innerWidth, innerHeight, false);
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  const portrait = innerHeight > innerWidth;
+  $('rotate').style.display = (started && portrait) ? 'flex' : 'none';
+  $('shutter').style.display = portrait ? 'none' : 'block';
+}
+addEventListener('resize', resize);
+
+let started = false;
+function loop() {
+  requestAnimationFrame(loop);
+  if (orient) {
+    const o = rad((screen.orientation && screen.orientation.angle) || window.orientation || 0);
+    deviceQuat(target, orient.a, orient.b, orient.g, o);
+    if (!camReady) { camera.quaternion.copy(target); align(); camReady = true; }
+    else camera.quaternion.slerp(target, 0.35);
+  }
+  renderer.render(scene, camera);
+}
+
+/* ---------- start ---------- */
+$('startBtn').addEventListener('click', async () => {
+  // fullscreen + landscape lock must start from the tap itself
+  try { document.documentElement.requestFullscreen().then(() => screen.orientation.lock('landscape')).catch(() => {}); } catch (e) {}
+  $('startBtn').disabled = true; msg.textContent = 'Starting camera…';
+  try {
+    if (typeof DeviceOrientationEvent !== 'undefined' && DeviceOrientationEvent.requestPermission) {
+      const r = await DeviceOrientationEvent.requestPermission();
+      if (r !== 'granted') throw new Error('Motion sensor access was denied.');
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+    video.srcObject = stream; await video.play();
+    holders.e2c = await loadAircraft(AIRCRAFT[0]); root.add(holders.e2c);
+    holders.a4 = await loadAircraft(AIRCRAFT[1]); root.add(holders.a4);
+    layout();
+    started = true;
+    $('start').style.display = 'none'; $('hud').style.display = 'block';
+    if (ADMIN) { $('gear').style.display = 'block'; buildAdmin(); }
+    resize(); loop();
+    setTimeout(() => { if (!gotEvent) { $('hint').textContent = 'Motion sensors not detected - aircraft will not follow your phone.'; } }, 2500);
+  } catch (e) {
+    msg.textContent = 'Could not start: ' + e.message + ' (Allow camera access, and open the page in Chrome.)';
+    $('startBtn').disabled = false;
+  }
+});
+$('align').addEventListener('click', () => { align(); $('hint').textContent = 'Aligned. Face the real aircraft and take your photo.'; });
+
+/* ---------- take a photo and save ---------- */
+let lastBlob = null, lastUrl = null;
+$('shutter').addEventListener('click', () => {
+  renderer.render(scene, camera);                       // fresh frame, same tick as the copy below
+  const vw = video.videoWidth, vh = video.videoHeight, A = innerWidth / innerHeight;
+  let sx = 0, sy = 0, sw = vw, sh = vh;                 // crop video exactly like the screen shows it
+  if (vw / vh > A) { sw = vh * A; sx = (vw - sw) / 2; } else { sh = vw / A; sy = (vh - sh) / 2; }
+  const ow = Math.min(Math.round(sw), 1920), oh = Math.round(ow / A);
+  const c = document.createElement('canvas'); c.width = ow; c.height = oh;
+  const x = c.getContext('2d');
+  x.drawImage(video, sx, sy, sw, sh, 0, 0, ow, oh);
+  x.drawImage(glCanvas, 0, 0, ow, oh);
+  // circular logos in the two top corners
+  const ld = Math.round(oh * cfg.ls / 100), m = Math.round(oh * 0.025);
+  for (const [id, lx] of [['logoL', m], ['logoR', ow - m - ld]]) {
+    const im = $(id);
+    if (!im.complete || !im.naturalWidth || im.dataset.bad) continue;
+    const q = Math.min(im.naturalWidth, im.naturalHeight);
+    x.save(); x.beginPath(); x.arc(lx + ld / 2, m + ld / 2, ld / 2, 0, Math.PI * 2); x.closePath();
+    x.fillStyle = '#fff'; x.fill(); x.clip();
+    x.drawImage(im, (im.naturalWidth - q) / 2, (im.naturalHeight - q) / 2, q, q, lx, m, ld, ld);
+    x.restore();
+    x.beginPath(); x.arc(lx + ld / 2, m + ld / 2, ld / 2 - 1, 0, Math.PI * 2);
+    x.lineWidth = Math.max(2, ld * 0.03); x.strokeStyle = 'rgba(255,255,255,.9)'; x.stroke();
+  }
+  const fl = $('flash'); fl.style.opacity = 0.8; setTimeout(() => fl.style.opacity = 0, 120);
+  c.toBlob(b => {
+    lastBlob = b;
+    if (lastUrl) URL.revokeObjectURL(lastUrl);
+    lastUrl = URL.createObjectURL(b);
+    $('shot').src = lastUrl;
+    $('preview').style.display = 'flex';
+    const f = new File([b], 'photo.jpg', { type: 'image/jpeg' });
+    $('share').style.display = (navigator.canShare && navigator.canShare({ files: [f] })) ? 'inline-block' : 'none';
+  }, 'image/jpeg', 0.92);
+});
+const stamp = () => new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+$('save').addEventListener('click', () => {
+  const a = document.createElement('a');
+  a.href = lastUrl; a.download = 'static-display-' + stamp() + '.jpg';
+  document.body.appendChild(a); a.click(); a.remove();
+});
+$('share').addEventListener('click', async () => {
+  const f = new File([lastBlob], 'static-display-' + stamp() + '.jpg', { type: 'image/jpeg' });
+  try { await navigator.share({ files: [f], title: 'Static Display' }); } catch (e) {}
+});
+$('retake').addEventListener('click', () => { $('preview').style.display = 'none'; });
+
+/* ---------- setup panel (only with ?admin=1) ---------- */
+function buildAdmin() {
+  const items = [
+    ['fov', 'Camera zoom/FOV (deg)', 25, 70, 1],
+    ['h',   'Phone height (m)', 0.5, 2.5, 0.05],
+    ['d',   'Distance to aircraft line (m)', 10, 150, 1],
+    ['ex',  'E-2C to the left (m)', 0, 80, 1],
+    ['ax',  'A-4 to the right (m)', 0, 80, 1],
+    ['ey',  'E-2C turn (deg)', -90, 90, 1],
+    ['ay',  'A-4 turn (deg)', -90, 90, 1],
+    ['se',  'E-2C size (1 = life-size)', 0.3, 2, 0.01],
+    ['sa',  'A-4 size (1 = life-size)', 0.3, 2, 0.01],
+    ['ls',  'Logo size (% of photo height)', 6, 25, 1],
+  ];
+  const box = $('admin');
+  for (const [k, label, min, max, step] of items) {
+    const l = document.createElement('label');
+    const v = document.createElement('b'); v.textContent = cfg[k];
+    l.append(label + ': ', v);
+    const r = document.createElement('input');
+    r.type = 'range'; r.min = min; r.max = max; r.step = step; r.value = cfg[k];
+    r.addEventListener('input', () => { cfg[k] = +r.value; v.textContent = r.value; layout(); });
+    l.append(r); box.append(l);
+  }
+  const b = document.createElement('button'); b.textContent = 'Make link with these settings'; b.style.marginTop = '10px';
+  const t = document.createElement('textarea');
+  b.addEventListener('click', () => {
+    const q = Object.entries(cfg).map(([k, v]) => k + '=' + v).join('&');
+    t.value = location.origin + location.pathname + '?' + q;
+    t.select(); try { navigator.clipboard.writeText(t.value); } catch (e) {}
+  });
+  box.append(b, t);
+  $('gear').addEventListener('click', () => { box.style.display = box.style.display === 'block' ? 'none' : 'block'; });
+}
+</script>
+</body>
+</html>
